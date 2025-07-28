@@ -3,6 +3,7 @@
 
 const PAUSER_ROLE: felt252 = selector!("PAUSER_ROLE");
 const UPGRADER_ROLE: felt252 = selector!("UPGRADER_ROLE");
+const ADMIN_ROLE: felt252 = selector!("ADMIN_ROLE");
 
 #[starknet::contract]
 pub mod Crowdchain {
@@ -29,7 +30,7 @@ pub mod Crowdchain {
     use starknet::{
         ClassHash, ContractAddress, get_block_timestamp, get_caller_address, get_contract_address,
     };
-    use super::{PAUSER_ROLE, UPGRADER_ROLE};
+    use super::{ADMIN_ROLE, PAUSER_ROLE, UPGRADER_ROLE};
 
 
     component!(path: PausableComponent, storage: pausable, event: PausableEvent);
@@ -70,7 +71,11 @@ pub mod Crowdchain {
         campaign_completed_at: Map<u64, u64>,
         campaign_counter: u64,
         campaign_ids: Vec<u64>,
-        admin: ContractAddress,
+        // Admin tracking system
+        owner: ContractAddress, // Store owner address
+        admins: Map<ContractAddress, bool>, // Store admin addresses
+        admin_addresses: Map<u32, ContractAddress>, // Store admin addresses by index
+        admin_count: u32, // Keep track of total admins
         // Contribution storage
         contributions: Map<(u64, ContractAddress), u256>,
         campaign_total_contributions: Map<u64, u256>,
@@ -108,14 +113,18 @@ pub mod Crowdchain {
     }
 
     #[constructor]
-    fn constructor(ref self: ContractState, default_admin: ContractAddress) {
+    fn constructor(ref self: ContractState, owner: ContractAddress) {
         self.accesscontrol.initializer();
 
-        self.accesscontrol._grant_role(DEFAULT_ADMIN_ROLE, default_admin);
-        self.accesscontrol._grant_role(PAUSER_ROLE, default_admin);
-        self.accesscontrol._grant_role(UPGRADER_ROLE, default_admin);
+        // Grant OpenZeppelin roles to owner
+        self.accesscontrol._grant_role(DEFAULT_ADMIN_ROLE, owner);
+        self.accesscontrol._grant_role(PAUSER_ROLE, owner);
+        self.accesscontrol._grant_role(UPGRADER_ROLE, owner);
 
-        self.admin.write(default_admin);
+        // Initialize admin tracking system
+        self.owner.write(owner);
+        // Owner is not counted as an admin in the admin tracking system
+        self.admin_count.write(0);
     }
 
     #[generate_trait]
@@ -488,14 +497,136 @@ pub mod Crowdchain {
         fn get_campaign_contributions(self: @ContractState, campaign_id: u64) -> u256 {
             self.campaign_total_contributions.entry(campaign_id).read()
         }
+
+        /// @notice Checks if the given address is an admin or owner of the contract
+        /// @param address The address to check
+        /// @return bool True if the address is an admin or owner, false otherwise
+        fn is_admin_or_owner(self: @ContractState, address: ContractAddress) -> bool {
+            // Check if address is the contract owner
+            let owner = self.owner.read();
+            if address == owner {
+                return true;
+            }
+
+            // Check if address is in the admins mapping
+            if self.admins.entry(address).read() {
+                return true;
+            }
+
+            // Check if address has DEFAULT_ADMIN_ROLE (OpenZeppelin AccessControl)
+            let has_admin_role = self.accesscontrol.has_role(DEFAULT_ADMIN_ROLE, address);
+            if has_admin_role {
+                return true;
+            }
+
+            // Check if address has PAUSER_ROLE or UPGRADER_ROLE (admin-level roles)
+            let has_pauser_role = self.accesscontrol.has_role(PAUSER_ROLE, address);
+            let has_upgrader_role = self.accesscontrol.has_role(UPGRADER_ROLE, address);
+            let has_admin_role = self.accesscontrol.has_role(ADMIN_ROLE, address);
+
+            has_pauser_role || has_upgrader_role || has_admin_role
+        }
+
+        /// @notice Checks if the given address is an approved creator
+        /// @param address The wallet address to verify
+        /// @return bool True if the address is an approved creator, false otherwise
+        fn is_approved_creator(self: @ContractState, address: ContractAddress) -> bool {
+            self.approved_creators.entry(address).read()
+        }
+
+        /// @notice Returns the contract owner address
+        /// @return ContractAddress The owner's address
+        fn get_owner(self: @ContractState) -> ContractAddress {
+            self.owner.read()
+        }
+
+        /// @notice Adds a new admin to the contract (only owner can call)
+        /// @param admin The address to add as admin
+        fn add_admin(ref self: ContractState, admin: ContractAddress) {
+            // Only owner can add admins
+            let caller = get_caller_address();
+            let owner = self.owner.read();
+            assert(caller == owner, 'Only owner can add admins');
+
+            // Check if already an admin
+            if self.admins.entry(admin).read() {
+                return; // Already an admin, do nothing
+            }
+
+            // Add to admins mapping
+            self.admins.entry(admin).write(true);
+
+            // Add to admin_addresses array
+            let current_count = self.admin_count.read();
+            self.admin_addresses.entry(current_count).write(admin);
+            self.admin_count.write(current_count + 1);
+        }
+
+        /// @notice Removes an admin from the contract (only owner can call)
+        /// @param admin The address to remove as admin
+        fn remove_admin(ref self: ContractState, admin: ContractAddress) {
+            // Only owner can remove admins
+            let caller = get_caller_address();
+            let owner = self.owner.read();
+            assert(caller == owner, 'Only owner can remove admins');
+
+            // Cannot remove owner
+            assert(admin != owner, 'Cannot remove owner');
+
+            // Check if actually an admin
+            if !self.admins.entry(admin).read() {
+                return; // Not an admin, do nothing
+            }
+
+            // Remove from admins mapping
+            self.admins.entry(admin).write(false);
+            // Note: We don't remove from admin_addresses array to maintain indices
+        // The is_admin function will check the admins mapping for active status
+        }
+
+        /// @notice Checks if an address is an admin (not including owner)
+        /// @param address The address to check
+        /// @return bool True if the address is an admin, false otherwise
+        fn is_admin(self: @ContractState, address: ContractAddress) -> bool {
+            self.admins.entry(address).read()
+        }
+
+        /// @notice Returns the total number of admins (including inactive ones)
+        /// @return u32 The total admin count
+        fn get_admin_count(self: @ContractState) -> u32 {
+            self.admin_count.read()
+        }
+
+        /// @notice Returns the admin address at a specific index
+        /// @param index The index to query
+        /// @return ContractAddress The admin address at the given index
+        fn get_admin_by_index(self: @ContractState, index: u32) -> ContractAddress {
+            assert(index < self.admin_count.read(), 'Index out of bounds');
+            self.admin_addresses.entry(index).read()
+        }
+
+        /// @notice Returns all admin addresses (including inactive ones)
+        /// @return Array<ContractAddress> Array of all admin addresses
+        fn get_all_admins(self: @ContractState) -> Array<ContractAddress> {
+            let mut admins = ArrayTrait::new();
+            let admin_count = self.admin_count.read();
+            let mut i = admin_count;
+
+            while i != 0 {
+                i -= 1;
+                let admin_address = self.admin_addresses.entry(i).read();
+                admins.append(admin_address);
+            }
+
+            admins
+        }
     }
 
     #[generate_trait]
     impl Private of PrivateTrait {
         fn assert_is_admin(self: @ContractState) {
             let caller = get_caller_address();
-            let admin = self.admin.read();
-            assert(caller == admin, 'Caller is not admin');
+            assert(self.is_admin_or_owner(caller), 'Caller is not admin');
         }
 
         fn assert_is_creator(self: @ContractState, campaign_id: u64) {

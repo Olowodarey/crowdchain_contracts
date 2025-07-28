@@ -35,4 +35,17 @@ pub trait ICrowdchain<TContractState> {
         self: @TContractState, campaign_id: u64, contributor: ContractAddress,
     ) -> u256;
     fn get_campaign_contributions(self: @TContractState, campaign_id: u64) -> u256;
+
+    // Enhanced role verification functions
+    fn is_admin_or_owner(self: @TContractState, address: ContractAddress) -> bool;
+    fn is_approved_creator(self: @TContractState, address: ContractAddress) -> bool;
+    fn get_owner(self: @TContractState) -> ContractAddress;
+
+    // Admin management functions
+    fn add_admin(ref self: TContractState, admin: ContractAddress);
+    fn remove_admin(ref self: TContractState, admin: ContractAddress);
+    fn is_admin(self: @TContractState, address: ContractAddress) -> bool;
+    fn get_admin_count(self: @TContractState) -> u32;
+    fn get_admin_by_index(self: @TContractState, index: u32) -> ContractAddress;
+    fn get_all_admins(self: @TContractState) -> Array<ContractAddress>;
 }
